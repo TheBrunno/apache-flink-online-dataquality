@@ -91,3 +91,11 @@ services:
     depends_on:
       - kafka
     restart: unless-stopped
+
+  main-processing:
+    build:
+      context: ./main-processing
+    container_name: main-processing
+    depends_on:
+      - kafka
+    restart: unless-stopped
