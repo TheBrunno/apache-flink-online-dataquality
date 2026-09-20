@@ -1,9 +1,14 @@
 import json
 
 from pyflink.common import WatermarkStrategy
-from pyflink.common.serialization import SimpleStringSchema
+from pyflink.common.serialization import SimpleStringSchema, ByteArraySchema
 from pyflink.datastream import StreamExecutionEnvironment
-from pyflink.datastream.connectors.kafka import KafkaSource
+from pyflink.datastream.connectors.kafka import (
+    KafkaSource,
+    KafkaSink,
+    KafkaRecordSerializationSchema,
+    DeliveryGuarantee
+)
 
 
 env = StreamExecutionEnvironment.get_execution_environment()
@@ -43,18 +48,12 @@ def validate_financeiro(value):
     if event.get("type") not in ["PIX", "TED", "CARD"]:
         problems.append("INVALID_TYPE")
 
-    if problems:
-        return {
-            "domain": "financeiro",
-            "quality": "INVALID",
-            "problems": problems,
-            "event": event
-        }
-
     return {
         "domain": "financeiro",
-        "quality": "VALID",
-        "problems": [],
+        "quality": "INVALID" if problems else "VALID",
+        "timestamp": event.get("timestamp"),
+        "event_id": event.get("transaction_id"),
+        "problems": problems,
         "event": event
     }
 
@@ -75,18 +74,12 @@ def validate_nao_financeiro(value):
     if event.get("device") not in ["MOBILE", "WEB", "ATM"]:
         problems.append("INVALID_DEVICE")
 
-    if problems:
-        return {
-            "domain": "nao-financeiro",
-            "quality": "INVALID",
-            "problems": problems,
-            "event": event
-        }
-
     return {
         "domain": "nao-financeiro",
-        "quality": "VALID",
-        "problems": [],
+        "quality": "INVALID" if problems else "VALID",
+        "timestamp": event.get("timestamp"),
+        "event_id": event.get("event_id"),
+        "problems": problems,
         "event": event
     }
 
@@ -97,6 +90,7 @@ financeiro_stream = env.from_source(
     "financeiro"
 )
 
+
 nao_financeiro_stream = env.from_source(
     nao_financeiro_source,
     WatermarkStrategy.no_watermarks(),
@@ -105,11 +99,35 @@ nao_financeiro_stream = env.from_source(
 
 
 financeiro_quality = financeiro_stream.map(validate_financeiro)
+
 nao_financeiro_quality = nao_financeiro_stream.map(validate_nao_financeiro)
 
 
 financeiro_quality.print("DQ FINANCEIRO")
+
 nao_financeiro_quality.print("DQ NAO-FINANCEIRO")
+
+
+violations = financeiro_quality.union(nao_financeiro_quality) \
+    .filter(lambda result: result["quality"] == "INVALID") \
+    .map(lambda result: json.dumps(result).encode("utf-8"))
+
+
+quality_events_sink = KafkaSink.builder() \
+    .set_bootstrap_servers("kafka:29092") \
+    .set_record_serializer(
+        KafkaRecordSerializationSchema.builder()
+        .set_topic("data-quality-events")
+        .set_value_serialization_schema(
+            ByteArraySchema()
+        )
+        .build()
+    ) \
+    .set_delivery_guarantee(DeliveryGuarantee.AT_LEAST_ONCE) \
+    .build()
+
+
+violations.sink_to(quality_events_sink)
 
 
 env.execute("Data Quality Monitoring")
